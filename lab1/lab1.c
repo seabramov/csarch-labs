@@ -8,8 +8,6 @@ typedef unsigned int uint32;
 typedef unsigned short int uint16;
 
 #define SEGMENT_DESCRIPTOR_SIZE	8
-#define DEFAULT_LDT_NUM	10
-
 
 #pragma pack(push, 1)
 
@@ -50,12 +48,39 @@ typedef union desc
 		uint32 db:1;
 		uint32 g:1;
 		uint32 base_addr_hi:8;						
-	}; 
+	};
+
 } desc_t;
 
 #pragma pack(pop)
 
-void app_seg_type(FILE* fp, desc_t desc)
+typedef enum sys_types 
+{
+	NOPE = 0,
+	LDT = 2,
+	TASK_GATE = 5,
+	TSS_A = 9,
+	TSS_B = 11,
+	INTERRUPT_GATE = 14,
+	TRAP_GATE = 15
+} sys_types;
+
+uint32 get_priv_level(desc_t desc)
+{
+	return desc.dpl;
+}
+
+uint32 get_limit_from_desc(desc_t desc)
+{
+	return ((desc.seg_lim_hi << 16) | (desc.seg_lim_lo));
+}
+
+uint32 get_base_from_desc(desc_t desc)
+{
+	return ((desc.base_addr_hi << 24) | (desc.base_addr_mid << 16) | (desc.base_addr_lo));
+}	
+
+int app_seg_type(FILE* fp, desc_t desc)
 {
 	switch (desc.type)
 	{
@@ -107,13 +132,15 @@ void app_seg_type(FILE* fp, desc_t desc)
 		case 15: 
 			fprintf(fp, " Execute/Read, conforming, accessed type\n");	
 			break;
+		default:
+			break;
 	}
+
+	return 0;
 }
 
 int sys_seg_type(FILE* fp, desc_t desc)
 {
-	int ret = 0;
-
 	switch (desc.type)
 	{
 		case 0: 
@@ -124,8 +151,7 @@ int sys_seg_type(FILE* fp, desc_t desc)
 			break;
 		case 2: 
 			fprintf(fp, " LDT type\n");
-			ret |= 1; 
-			break;
+			return 2;
 		case 3: 
 			fprintf(fp, " 16-bit TSS (Busy) type\n");
 			break;
@@ -134,7 +160,7 @@ int sys_seg_type(FILE* fp, desc_t desc)
 			break;
 		case 5: 
 			fprintf(fp, " Task Gate type\n");
-			break;
+			return 5;
 		case 6: 
 			fprintf(fp, " 16-bit Interrupt Gate type\n");
 			break;
@@ -146,13 +172,13 @@ int sys_seg_type(FILE* fp, desc_t desc)
 			break;
 		case 9: 
 			fprintf(fp, " 32-bit TSS (Available) type\n");
-			break;
+			return 9;
 		case 10: 
 			fprintf(fp, " Reserved type\n");
 			break;
 		case 11: 
 			fprintf(fp, " 32-bit TSS (Busy) type\n");
-			break;
+			return 11;
 		case 12: 
 			fprintf(fp, " 32-bit Call Gate type\n");
 			break;
@@ -161,13 +187,13 @@ int sys_seg_type(FILE* fp, desc_t desc)
 			break;
 		case 14: 
 			fprintf(fp, " 32-bit Interrupt Gate type\n");
-			break;
+			return 14;
 		case 15: 
 			fprintf(fp, " 32-bit Trap Gate type\n");	
-			break;
+			return 15;
 	}
 
-	return ret;
+	return 0;
 }
 
 int seg_type(FILE* fp, desc_t desc) 
@@ -175,77 +201,15 @@ int seg_type(FILE* fp, desc_t desc)
 	if (desc.s == 1)
 	{
 		fprintf(fp, "Code and Data segment:\n");
-		app_seg_type(fp, desc);		
+		fprintf(fp, " Base address: 0x%x\n", get_base_from_desc(desc));
+		fprintf(fp, " Table limit: 0x%x\n", get_limit_from_desc(desc));
+		return app_seg_type(fp, desc);		
 	}
 	else
 	{
 		fprintf(fp, "System segment:\n");			
 		return sys_seg_type(fp, desc);
 	}
-
-	return 0;
-}
-
-void priv_level(FILE* fp, desc_t desc)
-{
-	fprintf(fp, " Descriptor privilege level: %d\n", desc.dpl);
-}
-
-uint32 get_limit_from_desc(desc_t desc)
-{
-	return ((desc.seg_lim_hi << 16) | (desc.seg_lim_lo));
-}
-
-uint32 get_base_from_desc(desc_t desc)
-{
-	return ((desc.base_addr_hi << 24) | (desc.base_addr_mid << 16) | (desc.base_addr_lo));
-}	
-
-int seg_desc_handler(FILE* fp, desc_t desc)
-{
-	int ret = 0;
-
-	if (desc.p == 1)
-	{
-		ret = seg_type(fp, desc);
-		
-		if (ret != 0)
-			printf("ret code: %d\n", ret);
-		
-		priv_level(fp, desc);		
-		fprintf(fp, " Base address: 0x%x\n", get_base_from_desc(desc));
-		fprintf(fp, " Table limit: 0x%x\n", get_limit_from_desc(desc));
-	}
-
-	return ret;
-}
-
-void ldt_handler(desc_t desc)
-{
-	uint32 base_addr = 0;
-	uint32 table_limit = 0;
-	uint32 ldt_entries_num;
-	desc_t* ldt_ptr;	
-	int i;
-	FILE* fp;
-
-	fp = fopen("ldt.txt", "w+");
-
-	base_addr = get_base_from_desc(desc);
-	table_limit = get_limit_from_desc(desc);
-
-	printf("ldt base addr: 0x%x\n", base_addr);
-	printf("ldt table_limit: 0x%x\n", table_limit);
-
-	ldt_ptr = (desc_t*) base_addr;
-	ldt_entries_num = table_limit / SEGMENT_DESCRIPTOR_SIZE;
-
-	for (i = 0; i < ldt_entries_num; i++)
-	{
-		seg_desc_handler(fp, ldt_ptr[i]);
-	}
-
-	fclose(fp);
 }
 
 void tss_handler(desc_t desc)
@@ -254,8 +218,10 @@ void tss_handler(desc_t desc)
 	uint32 table_limit = 0;
 	uint32 tss_entries_num;
 	desc_t* tss_ptr;	
-	int i;
 	FILE* fp;
+
+	if (!desc.p)
+		return;
 
 	fp = fopen("tss.txt", "w+");
 
@@ -263,36 +229,143 @@ void tss_handler(desc_t desc)
 	table_limit = get_limit_from_desc(desc);
 
 	tss_ptr = (desc_t*) base_addr;
-	tss_entries_num = table_limit / SEGMENT_DESCRIPTOR_SIZE;
+	
+	fprintf(fp, "TSS: table_limit: 0x%x, base addr: 0x%x\n", table_limit, base_addr);
 
-	for (i = 0; i < tss_entries_num; i++)
+	// Need to print something	
+
+	fclose(fp);	
+}
+
+void task_gate_handler(desc_t desc, uint32 gdt_base)
+{
+	desc_t* tss_ptr;
+	uint32 tss_base_addr;
+	uint32 tss_limit;
+	uint32 tss_selector = desc.base_addr_lo;
+
+	tss_ptr = (desc_t*)(tss_selector + gdt_base);		//FIXME: Need to check
+	tss_handler(*tss_ptr);
+}
+
+void ldt_handler(desc_t desc)
+{
+
+	uint32 base_addr = 0;
+	uint32 table_limit = 0;
+	uint32 ldt_entries_num;
+	desc_t* ldt_ptr;	
+	dtr_t _gdtr;
+	int i;
+	FILE* fp;
+	int ret = 0;
+
+
+	if (!desc.p)
+		return;
+
+	fp = fopen("ldt.txt", "w+");
+
+	base_addr = get_base_from_desc(desc);
+	table_limit = get_limit_from_desc(desc);
+
+	fprintf(fp, "LDT: table_limit: 0x%x, base addr: 0x%x\n", table_limit, base_addr);
+
+	ldt_ptr = (desc_t*) base_addr;
+	ldt_entries_num = table_limit / SEGMENT_DESCRIPTOR_SIZE;
+
+	for (i = 0; i < ldt_entries_num; i++)
 	{
-		seg_desc_handler(fp, tss_ptr[i]);
+		ret = seg_type(fp, ldt_ptr[i]);
+		fprintf(fp, " Privilege level: %d\n", get_priv_level(ldt_ptr[i]));			
+		
+		switch (ret)
+		{
+			case TSS_A:
+			case TSS_B:
+				tss_handler(desc);  
+				break;
+			case TASK_GATE:
+				__asm {
+					sgdt _gdtr
+				}	
+				task_gate_handler(desc, _gdtr.base_addr);
+				break;
+			default:
+				break;
+		}
 	}
 
-	fclose(fp);
+	fclose(fp);	
 }
 
-void sysseg_handler(int is_sysseg, desc_t desc)
+void gdt_handler(FILE* fp, desc_t desc)
 {
-	switch(is_sysseg)
+	int ret = 0;
+	dtr_t _gdtr;
+
+	if (desc.p == 1)
 	{
-		case 1: 
-			ldt_handler(desc);
+		ret = seg_type(fp, desc);
+		
+		fprintf(fp, " Privilege level: %d\n", get_priv_level(desc));		
+	
+		switch (ret)
+		{
+			case LDT:
+				ldt_handler(desc);
+				break;
+			case TSS_A:
+			case TSS_B:
+				tss_handler(desc);  
+				break;
+			case TASK_GATE:
+				__asm {
+					sgdt _gdtr
+				}	
+				task_gate_handler(desc, _gdtr.base_addr);
+				break;
+			default:
+				break;
+		}
+	}	
+
+}
+
+void interrupt_trap_gate_handler(FILE* fp, desc_t desc)
+{
+	if (!(desc.p))
+		return;
+
+	fprintf(fp, " Segment selector: 0x%x\n", desc.base_addr_lo);
+	fprintf(fp, " Offset: 0x%x\n", (desc.hi & 0xffff0000) | (desc.lo & 0x0000ffff));	
+}
+
+void idt_handler(FILE* fp, desc_t desc)
+{
+	int ret = 0;
+	dtr_t _gdtr;	
+
+	ret = seg_type(fp, desc);	
+	fprintf(fp, " Privilege level: %d\n", get_priv_level(desc));
+
+	switch (ret)
+	{
+		case TASK_GATE:
+			__asm {
+				sgdt _gdtr
+			}
+			task_gate_handler(desc, _gdtr.base_addr);			
 			break;
-		case 2: 
-			tss_handler(desc);
-			break;
-		case 3:
-			ldt_handler(desc);
-			tss_handler(desc);
+		case INTERRUPT_GATE:
+		case TRAP_GATE:
+			interrupt_trap_gate_handler(fp, desc);
 			break;
 		default:
-			printf("error\n");
 			break;
-	}	
-}
+	} 		
 
+}
 
 int main()
 {
@@ -302,13 +375,13 @@ int main()
 	FILE* idt_fp;
 	desc_t* desc_ptr;
 	desc_t* idt_ptr;	
-	uint32 gdtr_entries_num;
+	uint32 gdt_entries_num;
 	uint32 idt_entries_num;
 
 	int i;
 	int is_sysseg = 0;
 
-	fp = fopen("dtr.txt", "w+");
+	fp = fopen("gdt.txt", "w+");
 
 	if (fp == NULL)
 		printf("file open error 0\n");
@@ -320,33 +393,28 @@ int main()
 		sidt _idtr
 	}
 
-	printf("GDT:\ntable limit: 0x%x, base address: 0x%x \n", 
+	printf("GDT: table limit: 0x%x, base address: 0x%x \n", 
 		_gdtr.table_limit,
 		_gdtr.base_addr
 	);
 
-	printf("IDT:\ntable limit: 0x%x, base address: 0x%x \n", 
+	printf("IDT: table limit: 0x%x, base address: 0x%x \n", 
 		_idtr.table_limit,
 		_idtr.base_addr
 	);
 
-	fprintf(fp, "table limit: 0x%x, base address: 0x%x \n", 
+	fprintf(fp, "GDT: table limit: 0x%x, base address: 0x%x \n", 
 		_gdtr.table_limit,
 		_gdtr.base_addr
 	);
 
 
 	desc_ptr = (desc_t*)_gdtr.base_addr;
-	gdtr_entries_num = _gdtr.table_limit / SEGMENT_DESCRIPTOR_SIZE;
+	gdt_entries_num = _gdtr.table_limit / SEGMENT_DESCRIPTOR_SIZE;
 
-	for (i = 0; i < gdtr_entries_num; i++)
+	for (i = 0; i < gdt_entries_num; i++)
 	{
-		is_sysseg = seg_desc_handler(fp, desc_ptr[i]);
-	
-		if (is_sysseg)
-		{
-			sysseg_handler(is_sysseg, desc_ptr[i]);
-		}
+		gdt_handler(fp, desc_ptr[i]);
 	}
 	
 	fclose(fp);
@@ -357,7 +425,7 @@ int main()
 		printf("file open error 1\n");
 
 
-	fprintf(idt_fp, "table limit: 0x%x, base address: 0x%x \n", 
+	fprintf(idt_fp, "IDT: table limit: 0x%x, base address: 0x%x \n", 
 		_idtr.table_limit,
 		_idtr.base_addr
 	);
@@ -367,11 +435,10 @@ int main()
 
 	for (i = 0; i < idt_entries_num; i++)
 	{
-		is_sysseg = seg_desc_handler(idt_fp, idt_ptr[i]);		
+		idt_handler(idt_fp, idt_ptr[i]);		
 	}
 
 	fclose(idt_fp);
 
 	return 0;
 }
-
